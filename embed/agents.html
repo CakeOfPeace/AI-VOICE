@@ -1,0 +1,201 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agents Admin</title>
+  <style>
+    :root { --bg: #0b0f13; --panel: #121821; --muted: #8aa0b3; --text: #e6eef6; --accent: #2dd4bf; --danger: #ef4444; }
+    html, body { margin:0; padding:0; background:var(--bg); color:var(--text); font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"; }
+    header { display:flex; align-items:center; justify-content:space-between; padding:16px 20px; background:var(--panel); border-bottom:1px solid #1f2a37; position:sticky; top:0; z-index:10; }
+    header h1 { font-size:16px; margin:0; letter-spacing:0.5px; }
+    #authBar { display:flex; gap:8px; align-items:center; color:var(--muted); }
+    #authBar input { background:#0f141b; border:1px solid #223042; color:var(--text); padding:8px 10px; border-radius:6px; }
+    #authBar button { background:#1e293b; color:var(--text); border:1px solid #223042; padding:8px 12px; border-radius:6px; cursor:pointer; }
+    #authBar button.primary { background:var(--accent); color:#082c2a; border:0; }
+    main { padding:20px; }
+    .grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap:16px; }
+    .card { background:var(--panel); border:1px solid #1f2a37; border-radius:12px; padding:16px; display:flex; flex-direction:column; gap:10px; }
+    .name { font-weight:600; font-size:16px; }
+    .meta { color:var(--muted); font-size:12px; }
+    .row { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+    .btn { padding:8px 10px; border-radius:8px; border:1px solid #223042; background:#0f141b; color:var(--text); cursor:pointer; font-size:13px; }
+    .btn.delete { background: rgba(239, 68, 68, 0.1); border-color:#3b1e1e; color:#fecaca; }
+    .btn.delete[disabled] { opacity:0.5; cursor:not-allowed; }
+    .search { margin-bottom:16px; display:flex; gap:8px; }
+    .search input { flex:1; background:#0f141b; border:1px solid #223042; color:var(--text); padding:10px 12px; border-radius:8px; }
+    .toast { position:fixed; right:16px; bottom:16px; background:#0f141b; border:1px solid #223042; color:var(--text); padding:12px 14px; border-radius:8px; display:none; }
+    .modal-backdrop { position:fixed; inset:0; background:rgba(0,0,0,0.6); display:none; align-items:center; justify-content:center; z-index:50; }
+    .modal { width:92vw; max-width:400px; background:var(--panel); border:1px solid #1f2a37; border-radius:12px; padding:16px; }
+    .modal h3 { margin:0 0 8px 0; font-size:16px; }
+    .modal .actions { display:flex; justify-content:flex-end; gap:8px; margin-top:14px; }
+    .muted { color:var(--muted); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Agents Admin</h1>
+    <div id="authBar">
+      <span id="userLabel" class="muted"></span>
+      <input id="email" type="email" placeholder="email" />
+      <input id="password" type="password" placeholder="password" />
+      <button id="loginBtn" class="primary">Login</button>
+      <button id="logoutBtn" style="display:none;">Logout</button>
+    </div>
+  </header>
+  <main>
+    <div class="search">
+      <input id="search" placeholder="Search agents by name…" />
+      <button class="btn" id="refreshBtn">Refresh</button>
+    </div>
+    <div id="grid" class="grid"></div>
+  </main>
+
+  <div id="toast" class="toast"></div>
+
+  <div id="confirmBackdrop" class="modal-backdrop">
+    <div class="modal">
+      <h3>Confirm Deletion</h3>
+      <div class="muted">Are you sure you want to delete <strong id="confirmName"></strong>?</div>
+      <div class="actions">
+        <button class="btn" id="cancelDelete">Cancel</button>
+        <button class="btn delete" id="confirmDelete">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const API_BASE = (window.CONFIG_API_BASE || '/api');
+    let authToken = localStorage.getItem('authToken') || '';
+    let currentUser = null;
+    let agents = [];
+    let pendingDelete = null;
+
+    const qs = (sel) => document.querySelector(sel);
+    const grid = qs('#grid');
+    const toastEl = qs('#toast');
+    const backdrop = qs('#confirmBackdrop');
+    const confirmName = qs('#confirmName');
+
+    function showToast(msg, ms = 2200) {
+      toastEl.textContent = msg; toastEl.style.display = 'block';
+      setTimeout(() => toastEl.style.display = 'none', ms);
+    }
+
+    function authHeaders() {
+      const h = { 'Content-Type': 'application/json' };
+      if (authToken) h['Authorization'] = 'Bearer ' + authToken;
+      return h;
+    }
+
+    async function login() {
+      const email = qs('#email').value.trim();
+      const password = qs('#password').value;
+      if (!email || !password) { showToast('Enter email and password'); return; }
+      const r = await fetch(API_BASE + '/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password }) });
+      const data = await r.json();
+      if (!r.ok) { showToast(data.error || 'Login failed'); return; }
+      authToken = data.token; localStorage.setItem('authToken', authToken); currentUser = data.user;
+      qs('#email').style.display = 'none'; qs('#password').style.display = 'none'; qs('#loginBtn').style.display = 'none'; qs('#logoutBtn').style.display = 'inline-block';
+      qs('#userLabel').textContent = (currentUser?.email || '');
+      await refresh();
+    }
+
+    function logout() {
+      authToken = ''; currentUser = null; localStorage.removeItem('authToken');
+      qs('#email').style.display = 'inline-block'; qs('#password').style.display = 'inline-block'; qs('#loginBtn').style.display = 'inline-block'; qs('#logoutBtn').style.display = 'none';
+      qs('#userLabel').textContent = '';
+      agents = []; render();
+    }
+
+    async function refresh() {
+      try {
+        const r = await fetch(API_BASE + '/agents', { headers: authHeaders() });
+        const data = await r.json();
+        if (!r.ok) { showToast(data.error || 'Failed to load agents'); return; }
+        agents = data.agents || [];
+        render();
+      } catch (e) {
+        showToast('Network error');
+      }
+    }
+
+    function render() {
+      const term = qs('#search').value.trim().toLowerCase();
+      grid.innerHTML = '';
+      const list = !term ? agents : agents.filter(a => (a.name || '').toLowerCase().includes(term));
+      if (!list.length) {
+        const empty = document.createElement('div');
+        empty.className = 'muted';
+        empty.textContent = 'No agents';
+        grid.appendChild(empty);
+        return;
+      }
+      for (const a of list) {
+        const el = document.createElement('div'); el.className = 'card';
+        const top = document.createElement('div'); top.className = 'row';
+        const name = document.createElement('div'); name.className = 'name'; name.textContent = a.name || '(unnamed)';
+        const del = document.createElement('button'); del.className = 'btn delete'; del.textContent = 'Delete'; del.disabled = !a.can_delete;
+        del.addEventListener('click', () => openConfirm(a));
+        top.appendChild(name); top.appendChild(del);
+        const meta = document.createElement('div'); meta.className = 'meta';
+        const owner = a.owner?.username || a.owner?.email || a.owner_id || '—';
+        meta.textContent = `Owner: ${owner}`;
+        el.appendChild(top); el.appendChild(meta);
+        grid.appendChild(el);
+      }
+    }
+
+    function openConfirm(agent) {
+      pendingDelete = agent; confirmName.textContent = agent.name || '(unnamed)';
+      backdrop.style.display = 'flex';
+    }
+
+    function closeConfirm() {
+      backdrop.style.display = 'none'; pendingDelete = null;
+    }
+
+    async function confirmDeletion() {
+      if (!pendingDelete) return;
+      try {
+        const r = await fetch(API_BASE + '/agents/' + encodeURIComponent(pendingDelete.id), { method: 'DELETE', headers: authHeaders() });
+        if (r.status === 204) {
+          showToast('Deleted ' + (pendingDelete.name || 'agent'));
+          closeConfirm();
+          await refresh();
+          return;
+        }
+        const data = await r.json().catch(() => ({}));
+        showToast(data.error || 'Delete failed');
+      } catch (e) {
+        showToast('Network error');
+      }
+    }
+
+    // Wiring
+    qs('#loginBtn').addEventListener('click', login);
+    qs('#logoutBtn').addEventListener('click', logout);
+    qs('#refreshBtn').addEventListener('click', refresh);
+    qs('#search').addEventListener('input', render);
+    qs('#cancelDelete').addEventListener('click', closeConfirm);
+    qs('#confirmDelete').addEventListener('click', confirmDeletion);
+
+    // Auto-login with stored token if present
+    (async function init() {
+      if (authToken) {
+        // Try to fetch user for label
+        try {
+          const r = await fetch(API_BASE + '/auth/me', { headers: authHeaders() });
+          const data = await r.json();
+          if (data?.user) { currentUser = data.user; }
+        } catch {}
+        qs('#email').style.display = 'none'; qs('#password').style.display = 'none'; qs('#loginBtn').style.display = 'none'; qs('#logoutBtn').style.display = 'inline-block';
+        qs('#userLabel').textContent = (currentUser?.email || '');
+        await refresh();
+      }
+    })();
+  </script>
+</body>
+</html>
+
+

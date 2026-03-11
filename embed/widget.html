@@ -1,0 +1,106 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Agent Widget</title>
+    <style>
+      :root { --bg:#0b1320; --card:#0f1a2b; --text:#e6eefb; --muted:#90a0b7; --accent:#8a7dff; }
+      html, body { height:100%; margin:0; background: radial-gradient(1200px 600px at 50% -200px, #1a2440 10%, #090e17 70%); color: var(--text); font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, Segoe UI Emoji; }
+      .wrap { display:flex; align-items:stretch; justify-content:center; height:100%; padding:14px; box-sizing:border-box; }
+      .card { display:flex; gap:14px; width:100%; max-width:1280px; background: rgba(10,16,28,0.65); border: 1px solid rgba(255,255,255,0.06); border-radius:14px; backdrop-filter: blur(8px); box-shadow: 0 10px 40px rgba(0,0,0,0.35); }
+      .stage { flex:1; display:flex; align-items:center; justify-content:center; position:relative; min-height:280px; }
+      .trans { width:360px; max-width:40%; border-left:1px solid rgba(255,255,255,0.06); background: rgba(6,10,20,0.6); border-radius:0 14px 14px 0; }
+      .t-head { padding:12px 14px; font-weight:600; color:#d3dcf7; border-bottom:1px solid rgba(255,255,255,0.06); }
+      .t-body { padding:12px 14px; height:calc(100% - 48px); overflow:auto; font-size:14px; color:var(--muted); }
+      .footer { position:absolute; bottom:16px; left:0; right:0; display:flex; justify-content:center; }
+      .btn { display:inline-flex; align-items:center; gap:8px; background:#121a2c; color:#e9f1ff; border:1px solid rgba(255,255,255,0.08); border-radius:10px; padding:10px 16px; cursor:pointer; font-weight:600; }
+      .btn[disabled] { opacity:0.5; cursor:not-allowed; }
+      .ring { width:280px; height:280px; border-radius:50%; display:grid; place-items:center; color:#fff; font-size:22px; font-weight:800; letter-spacing:0.3px; text-align:center; }
+      .ring::before { content:""; position:absolute; width:320px; height:320px; border-radius:50%; background: conic-gradient(#ffd1a6, #ff7dad, #a17dff, #9dfdcf, #ffd1a6); filter: blur(12px); opacity:0.5; z-index:0; }
+      .name { position:relative; z-index:1; text-shadow: 0 4px 16px rgba(0,0,0,0.4); }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="card">
+        <div class="stage">
+          <div class="ring"><div class="name" id="agentName">Agent</div></div>
+          <div class="footer"><button class="btn" id="startBtn">&#128222; Start Talking</button></div>
+          <audio id="agentAudio" autoplay playsinline></audio>
+        </div>
+        <div class="trans">
+          <div class="t-head">Transcript</div>
+          <div class="t-body" id="transcript">No transcript yet.</div>
+        </div>
+      </div>
+    </div>
+
+    <script src="https://unpkg.com/livekit-client/dist/livekit-client.umd.min.js"></script>
+    <script>
+      const qs = new URLSearchParams(window.location.search);
+      const sid = qs.get('sid');
+      if (!sid) { document.getElementById('transcript').textContent = 'Missing sid.'; }
+      const startBtn = document.getElementById('startBtn');
+      const agentAudio = document.getElementById('agentAudio');
+      const agentName = document.getElementById('agentName');
+      const transcriptEl = document.getElementById('transcript');
+
+      async function fetchToken() {
+        const r = await fetch(`/embed/token/${encodeURIComponent(sid)}`, { credentials: 'include' });
+        const j = await r.json();
+        if (!r.ok) throw new Error((j && j.error) || 'token_error');
+        try { if (j.title) agentName.textContent = j.title; } catch {}
+        return j; // { server_url, room, token, identity }
+      }
+
+      function appendLine(role, text) {
+        const atBottom = transcriptEl.scrollTop + transcriptEl.clientHeight >= transcriptEl.scrollHeight - 2;
+        if (transcriptEl.textContent === 'No transcript yet.') transcriptEl.textContent='';
+        const div = document.createElement('div');
+        div.style.margin = '4px 0';
+        div.innerHTML = `<b>${role}:</b> ${text}`;
+        transcriptEl.appendChild(div);
+        if (atBottom) transcriptEl.scrollTop = transcriptEl.scrollHeight;
+      }
+
+      startBtn.onclick = async () => {
+        startBtn.disabled = true;
+        try {
+          const { server_url, token, room } = await fetchToken();
+          const lk = window.LiveKit;
+          const lkRoom = new lk.Room({
+            publishDefaults: { dtx: true, red: true, audioBitrate: 32000 },
+            audioCaptureDefaults: { sampleRate: 16000, channelCount: 1 },
+          });
+
+          lkRoom.on(lk.RoomEvent.TrackSubscribed, (track) => {
+            if (track.kind === 'audio') track.attach(agentAudio);
+          });
+
+          // Lightweight transcript: rely on server transcript endpoint after session
+          lkRoom.on(lk.RoomEvent.ParticipantDisconnected, async () => {
+            try {
+              const r = await fetch(`/api/transcripts/by_room/${encodeURIComponent(room)}`);
+              if (r.ok) {
+                const data = await r.json();
+                const entries = (data.entries || []).slice(-10);
+                for (const e of entries) appendLine(e.role || 'unknown', e.text || '');
+              }
+            } catch {}
+          });
+
+          await lkRoom.connect(server_url, token);
+          const mic = await lk.createLocalAudioTrack({ noiseSuppression: true, echoCancellation: true, autoGainControl: true });
+          await lkRoom.localParticipant.publishTrack(mic);
+        } catch (e) {
+          console.error(e);
+          startBtn.disabled = false;
+          appendLine('system', 'Failed to start: ' + (e && e.message ? e.message : e));
+        }
+      };
+    </script>
+  </body>
+  </html>
+
+
